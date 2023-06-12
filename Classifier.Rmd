@@ -1,0 +1,162 @@
+---
+title: "Classification of PD and CTRL samples using Voom and NSC methods."
+author: "Tom Carroll"
+date: '2022-07-13'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning=FALSE,message = FALSE)
+runML <- function(data,meta,samplesToPredict=NULL){
+  if(!is.null(samplesToPredict)){
+    data <- data %>%
+      select(matches(samplesToPredict))
+    meta <- meta %>% filter(rownames(.) %in% samplesToPredict)
+  }
+  meta <- select(meta,Genotype)
+  data_hash <- rlang::hash(data)
+  meta_hash <- rlang::hash(meta)
+
+  nTest <- ceiling(ncol(data) * 0.3)
+  ind <- sample(ncol(data), nTest, FALSE)
+  data.train <- as.matrix(data[ ,-ind] + 1)
+  data.test <- as.matrix(data[ ,ind] + 1)
+  classtr <- DataFrame(condition = meta[-ind, ])
+  classts <- DataFrame(condition = meta[ind, ])
+
+  data.trainS4 = DESeqDataSetFromMatrix(countData = data.train,
+                                        colData = classtr,
+                                        design = formula(~condition))
+  data.testS4 = DESeqDataSetFromMatrix(countData = data.test,
+                                       colData = classts,
+                                       design = formula(~condition))
+
+  require(MLSeq)
+
+  ctrl.voomNSC2 <- voomControl(method = "repeatedcv",
+                               number = 5, repeats = 10,
+                               tuneLength = 10)
+
+
+  if(!file.exists(paste0(data_hash,"_",meta_hash,".Rds"))){
+    fit.voomNSC2 <- classify(data = data.trainS4,
+                             method = "voomNSC",
+                             normalize = "deseq",
+                             ref = "CTRL",
+                             control = ctrl.voomNSC2)
+    saveRDS(fit.voomNSC2,file = paste0(data_hash,"_",meta_hash,".Rds"))
+  }
+  fit.voomNSC2 <- readRDS(paste0(data_hash,"_",meta_hash,".Rds"))
+
+
+  genesOfI <- selectedGenes(fit.voomNSC2)
+  if(!(length(genesOfI) > 2000) & !(nrow(meta) > 200)){
+  metaDF <- DataFrame(meta)
+  data.full = DESeqDataSetFromMatrix(countData = data,
+                                        colData = metaDF,
+                                        design = formula(~Genotype))
+  toPlot <- DESeq(data.full) %>% vst
+
+  temp <- assay(toPlot)
+
+  k <- pheatmap::pheatmap(temp[rownames(temp) %in% genesOfI,],
+                     annotation_col = as.data.frame(colData(toPlot))[,1,drop=FALSE],
+                     scale ="row",silent=TRUE)
+  }else{
+    k <- NULL
+  }
+  return(list(Classifier=fit.voomNSC2,
+              ConfusionMatrix=confusionMat(fit.voomNSC2),
+              SelectedGenes=genesOfI,
+              Heatmap=k
+              )
+         )
+}
+
+```
+
+## Classifiers for CTRL and PD samples
+
+
+Here we will present classifiers for PD and CTRL samples implemented using voomNSC method. A voom method was chosen inline with the methodology used in the manuscript for differential expression, whereas Nearest Shrunken Centroids method is both suitable for RNA-seq and provides potential to identify classifier genes.
+
+### Classifiers for PD and CTRL brain samples.
+
+We run the classifiers for PD and CTRL samples (PUT regions) as done for the analysis within the manuscript.
+
+```{r ClassifierBuild}
+load("counts.table.brain.RData")
+load("meta.brain.RData")
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(magrittr)
+counts.table.brain <- counts.table.brain[!is.na(counts.table.brain$Gene_symbol),]
+rownames(counts.table.brain) <- counts.table.brain$Gene_symbol
+counts.table.brain <- counts.table.brain[,-1]
+library(DESeq2)
+set.seed(1710)
+
+cau_samples <- meta.brain[meta.brain$Region == "CAU",1]
+
+metadata_brain <- meta.brain %>%
+  column_to_rownames(var = "Sample") %>%
+  select(Genotype,Region)
+
+cau_brain_result <- runML(data=counts.table.brain,
+                          meta=metadata_brain,
+                          rownames(metadata_brain[metadata_brain$Region == "CAU",]))
+```
+
+#### Accuracy, Sensitivity and Selectivity for CAU classifier
+
+```{r}
+cau_brain_result$ConfusionMatrix
+```
+
+
+#### Plot of CAU and PUT samples based on CAU classifier genes
+
+```{r}
+require(DESeq2)
+brainDDS <- DESeqDataSetFromMatrix(counts.table.brain,
+                                   colData = metadata_brain,
+                                   design = ~Genotype)
+brainToPlot <- vst(brainDDS)
+
+pheatmap::pheatmap(brainToPlot[rownames(brainToPlot) %in% cau_brain_result$SelectedGenes,
+                               order(brainToPlot$Genotype,brainToPlot$Region)] %>% assay,
+                   annotation_col = metadata_brain %>% as.data.frame,
+                   cluster_cols = FALSE,
+                   scale="row")
+```
+
+### Test Predictors CAU on PUT
+
+```{r}
+
+brainDDS <- DESeqDataSetFromMatrix(counts.table.brain,
+                                   colData = metadata_brain,
+                                   design = ~Genotype)
+
+brainDDS_PUT <- DESeqDataSetFromMatrix(counts.table.brain %>%
+                                     select(rownames(metadata_brain[metadata_brain$Region == "PUT",])),
+                                   colData = metadata_brain %>%
+                                     filter(rownames(.) %in% rownames(metadata_brain[metadata_brain$Region == "PUT",])),
+                                   design = ~Genotype)
+
+brainDDS_CAU <- DESeqDataSetFromMatrix(counts.table.brain %>%
+                                         select(rownames(metadata_brain[metadata_brain$Region == "CAU",])),
+                                       colData = metadata_brain %>%
+                                         filter(rownames(.) %in% rownames(metadata_brain[metadata_brain$Region == "CAU",])),
+                                       design = ~Genotype)
+
+res <- predictClassify(cau_brain_result$Classifier,brainDDS_PUT)
+CauClassifierOnPut <- table(brainDDS_PUT$Genotype == res)["TRUE"]/length(brainDDS_PUT$Genotype)
+
+require(DT)
+Accuracy <- data.frame(CauClassifierOnPut)
+rownames(Accuracy) <- "Accuracy"
+DT::datatable(Accuracy)
+
+```

@@ -1,0 +1,96 @@
+---
+title: "Splines"
+author: "Tom Carroll"
+date: "3/17/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message = FALSE,warning = FALSE)
+```
+
+## Splines
+
+```{r cars,include=FALSE}
+library(tidyverse)
+library(org.Hs.eg.db)
+library(edgeR)
+library(limma)
+library(ggpubr)
+library(splines)
+library(GSVA)
+library(fgsea)
+library(MatrixGenerics)
+```
+
+```{r}
+
+load("counts_06212021 copy.RData") #counts data
+load("Samples_toUse_06212021 copy.RData") #metadata
+
+Sample_info <- left_join(colnames(counts_subset)[1:150] %>% 
+                           as_tibble %>% 
+                           dplyr::rename(Sample = value), 
+                         Samples_toUse, 
+                         by = "Sample") %>%
+  filter(is.na(Disease_duration)==FALSE,
+         !Disease_duration %in% c("CTRL", "UK"))
+
+#fix the counts matrix
+table(Sample_info$Sample %in% colnames(counts_subset))
+keep <- which(colnames(counts_subset) %in% Sample_info$Sample)
+counts_subset <- counts_subset[,keep] %>% as.matrix
+keep <- which(is.na(rownames(counts_subset))==FALSE)
+counts_subset <- counts_subset[keep,]
+
+table(colnames(counts_subset) == Sample_info$Sample)
+
+region <- Sample_info$Region
+disease_duration <- as.numeric(Sample_info$Disease_duration)
+
+X <- ns(disease_duration, df = 4)
+
+design <- model.matrix(~0 + region + region:X)
+dge <- DGEList(counts = counts_subset)
+
+cpm <- cpm(dge)
+
+keep <- filterByExpr(dge, group = region)
+dge <- dge[keep,,keep.lib.sizes=FALSE]
+plotDensities(cpm(dge, log = TRUE), legend = FALSE)
+dge <- calcNormFactors(dge, method = "TMM")
+lcpm <- cpm(dge, log = TRUE, prior.count = 3)
+eset <- ExpressionSet(assayData = lcpm)
+Hs_hallmarks <- gmtPathways("c5.all.v7.1.symbols.gmt copy.xls")
+
+```
+
+```{r,include=FALSE}
+gsva.go <- gsva(eset, Hs_hallmarks, min.sz = 10)
+```
+
+```{r, eval=FALSE}
+gsva.go <- gsva(eset, Hs_hallmarks, min.sz = 10)
+```
+
+
+```{r}
+vfit = lmFit(gsva.go,design)
+vfit= eBayes(vfit)
+
+arrayw<-arrayWeights(gsva.go,design=design)
+vfitAW = lmFit(gsva.go,design,weights = arrayw)
+vfitAW= eBayes(vfitAW)
+summa.fitAW <- decideTests(vfitAW)
+
+require(magrittr)
+
+results_cauAW <- topTable(vfitAW, coef=c(3,5,7,9), number = Inf) %>%
+  as_tibble(rownames = "pathway") %>% as.data.frame %T>% 
+  write.table("Results_CauWeighted.csv",sep=",",row.names = FALSE)
+
+results_putAW <- topTable(vfitAW, coef=c(4,6,8,10), number = Inf) %>%
+  as_tibble(rownames = "pathway")  %>% as.data.frame %T>% 
+  write.table("Results_PutWeighted.csv",sep=",",row.names = FALSE)
+
+```
